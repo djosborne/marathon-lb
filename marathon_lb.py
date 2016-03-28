@@ -512,12 +512,12 @@ logger = logging.getLogger('marathon_lb')
 
 class MarathonBackend(object):
 
-    def __init__(self, host, port, container_port, draining, ip):
+    def __init__(self, host, port, container_ip, container_port, draining):
         self.host = host
         self.port = port
+        self.container_ip = container_ip
         self.container_port = container_port
         self.draining = draining
-        self.ip = ip
 
     def __hash__(self):
         return hash((self.host, self.port))
@@ -551,8 +551,8 @@ class MarathonService(object):
             if healthCheck['protocol'] == 'HTTP':
                 self.mode = 'http'
 
-    def add_backend(self, host, port, container_port, draining, ip):
-        self.backends.add(MarathonBackend(host, port, container_port, draining, ip))
+    def add_backend(self, host, port, container_ip, container_port, draining):
+        self.backends.add(MarathonBackend(host, port, container_ip, container_port, draining))
 
     def __hash__(self):
         return hash(self.servicePort)
@@ -883,7 +883,7 @@ def config(apps, groups, bind_http_https, ssl_certs, templater):
                         str(healthCheckPort) if healthCheckPort else ''
                     )
             if app.ip_per_container:
-                ipv4 = backendServer.ip
+                ipv4 = backendServer.container_ip
                 port = backendServer.container_port
             else:
                 ipv4 = resolve_ip(backendServer.host)
@@ -1331,15 +1331,18 @@ def get_apps(marathon):
         service_ports = app['ports']
         for i in range(len(service_ports)):
             servicePort = service_ports[i]
-            port_mappings = app['container']['docker']['portMappings']
+            # Find the container port tied to this service port
             container_port = None
-            for port_mapping in port_mappings:
+            for port_mapping in app['container']['docker']['portMappings']:
                 if port_mapping['servicePort'] == servicePort:
                     container_port = port_mapping['containerPort']
+                    break
             if not container_port:
-               raise Exception("No container port found") 
+               raise Exception("No matching container port found for service port %s" % servicePort) 
+
             service = MarathonService(
                         appId, servicePort, container_port, get_health_check(app, i))
+
             if 'HAPROXY_IP_PER_CONTAINER' in marathon_app.app['labels']:
                 service.ip_per_container = True
 
@@ -1382,15 +1385,17 @@ def get_apps(marathon):
 
             for i in range(number_of_defined_ports):
                 task_port = task_ports[i]
+                # Arbitrarily use the container's first specified IP
+                container_ip = task['ipAddresses'][0]['ipAddress']
                 service_port = service_ports[i]
                 service = marathon_app.services.get(service_port, None)
                 if service:
                     service.groups = marathon_app.groups
                     service.add_backend(task['host'],
                                         task_port,
+                                        container_ip,
                                         container_port,
-                                        draining,
-                                        task['ipAddresses'][0]['ipAddress'])
+                                        draining)
 
     # Convert into a list for easier consumption
     apps_list = []
