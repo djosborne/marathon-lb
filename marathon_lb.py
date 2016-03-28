@@ -512,10 +512,12 @@ logger = logging.getLogger('marathon_lb')
 
 class MarathonBackend(object):
 
-    def __init__(self, host, port, draining):
+    def __init__(self, host, port, container_port, draining, ip):
         self.host = host
         self.port = port
+        self.container_port = container_port
         self.draining = draining
+        self.ip = ip
 
     def __hash__(self):
         return hash((self.host, self.port))
@@ -526,7 +528,7 @@ class MarathonBackend(object):
 
 class MarathonService(object):
 
-    def __init__(self, appId, servicePort, healthCheck):
+    def __init__(self, appId, servicePort, containerPort, healthCheck):
         self.appId = appId
         self.servicePort = servicePort
         self.backends = set()
@@ -542,13 +544,15 @@ class MarathonService(object):
         self.mode = 'tcp'
         self.balance = 'roundrobin'
         self.healthCheck = healthCheck
+        self.ip_per_container = False
+        self.container_port = containerPort
         self.labels = {}
         if healthCheck:
             if healthCheck['protocol'] == 'HTTP':
                 self.mode = 'http'
 
-    def add_backend(self, host, port, draining):
-        self.backends.add(MarathonBackend(host, port, draining))
+    def add_backend(self, host, port, container_port, draining, ip):
+        self.backends.add(MarathonBackend(host, port, container_port, draining, ip))
 
     def __hash__(self):
         return hash(self.servicePort)
@@ -878,15 +882,19 @@ def config(apps, groups, bind_http_https, ssl_certs, templater):
                         healthCheckPortOptions=' port ' +
                         str(healthCheckPort) if healthCheckPort else ''
                     )
-            ipv4 = resolve_ip(backendServer.host)
-
+            if app.ip_per_container:
+                ipv4 = backendServer.ip
+                port = backendServer.container_port
+            else:
+                ipv4 = resolve_ip(backendServer.host)
+                port = backendServer.port
             if ipv4 is not None:
                 backend_server_options = templater \
                     .haproxy_backend_server_options(app)
                 backends += backend_server_options.format(
                     host=backendServer.host,
                     host_ipv4=ipv4,
-                    port=backendServer.port,
+                    port=port,
                     serverName=serverName,
                     cookieOptions=' check cookie ' +
                     serverName if app.sticky else '',
@@ -1323,8 +1331,17 @@ def get_apps(marathon):
         service_ports = app['ports']
         for i in range(len(service_ports)):
             servicePort = service_ports[i]
+            port_mappings = app['container']['docker']['portMappings']
+            container_port = None
+            for port_mapping in port_mappings:
+                if port_mapping['servicePort'] == servicePort:
+                    container_port = port_mapping['containerPort']
+            if not container_port:
+               raise Exception("No container port found") 
             service = MarathonService(
-                        appId, servicePort, get_health_check(app, i))
+                        appId, servicePort, container_port, get_health_check(app, i))
+            if 'HAPROXY_IP_PER_CONTAINER' in marathon_app.app['labels']:
+                service.ip_per_container = True
 
             for key_unformatted in label_keys:
                 key = key_unformatted.format(i)
@@ -1371,7 +1388,9 @@ def get_apps(marathon):
                     service.groups = marathon_app.groups
                     service.add_backend(task['host'],
                                         task_port,
-                                        draining)
+                                        container_port,
+                                        draining,
+                                        task['ipAddresses'][0]['ipAddress'])
 
     # Convert into a list for easier consumption
     apps_list = []
