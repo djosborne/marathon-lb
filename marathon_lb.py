@@ -50,6 +50,7 @@ import random
 
 logger = logging.getLogger('marathon_lb')
 
+next_available_service_port = 11000
 
 class MarathonBackend(object):
 
@@ -692,6 +693,7 @@ def generateHttpVhostAcl(templater, app, backend):
 
 
 def writeConfigAndValidate(config, config_file):
+    print config
     # Test run, print to stdout and exit
     if args.dry:
         print(config)
@@ -864,7 +866,19 @@ def get_apps(marathon):
                 marathon_app.app['labels']['HAPROXY_GROUP'].split(',')
         marathon_apps.append(marathon_app)
 
-        service_ports = app['ports']
+        service_ports = []
+        # If the created app specified that its using ip-per container
+        # by providing the ipAddress field in its app definition,
+        if app['ipAddress']:
+            if app['ipAddress']['discovery']:
+                discovery_ports = [int(discovery_port['number']) for discovery_port in app['ipAddress']['discovery']['ports']]
+                for discovery_port in discovery_ports:
+                    # Get an available servicePort
+                    global next_available_service_port
+                    servicePort = next_available_service_port
+                    next_available_service_port += 1
+                    app['ports'].append(servicePort)
+
         for i in range(len(service_ports)):
             servicePort = service_ports[i]
             service = MarathonService(
@@ -898,22 +912,31 @@ def get_apps(marathon):
                 if not alive:
                     continue
 
-            task_ports = task.get('ports', [])
+            try:
+               task_ports = [int(port['number']) for port in app['ipAddress']['discovery']['ports']]
+            except KeyError:
+               task_ports = task.get('ports', [])
+ 
             draining = False
             if 'draining' in task:
                 draining = task['draining']
+            import pdb; pdb.set_trace()
 
             # if different versions of app have different number of ports,
             # try to match as many ports as possible
             number_of_defined_ports = min(len(task_ports), len(service_ports))
-
-            for i in range(number_of_defined_ports):
-                task_port = task_ports[i]
+            import pdb; pdb.set_trace()
+                if app['ipAddress'] and app['ipAddress']['discovery']['ports']:
+                    task_port = int(app['ipAddress']['discovery']['ports'][0]['number'])
+                    task_ip = task['ipAddresses'][0]['ipAddress'] 
+                else:
+                    task_port = task_ports[i]
+                    task_ip = task['host']
                 service_port = service_ports[i]
                 service = marathon_app.services.get(service_port, None)
                 if service:
                     service.groups = marathon_app.groups
-                    service.add_backend(task['host'],
+                    service.add_backend(task_ip,
                                         task_port,
                                         draining)
 
